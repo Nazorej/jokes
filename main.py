@@ -1,189 +1,215 @@
-# Это программа на Python
 # Импортируем модули
+import os
 import random
-import time
-import sys
-from PyQt5.QtWidgets import QApplication, QLabel, QDesktopWidget, QPushButton, QWidget
-from PyQt5.QtGui import QFont, QIcon
-from PyQt5.QtCore import Qt, QTime, QTimer
-from datetime import datetime
 import sqlite3
+import sys
+from datetime import datetime
 
-# Создаем константу для хранения интервала таймера в секундах (1800 секунд = 30 минут)
+from PyQt6 import QtWidgets, QtCore, QtGui
+
+# Пути к файлам — рядом со скриптом, чтобы находились при любом запуске
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ICON_PATH = os.path.join(BASE_DIR, "favicon.jpg")
+ANECDOTES_DB = os.path.join(BASE_DIR, "anecdotes.db")
+HISTORY_DB = os.path.join(BASE_DIR, "history.db")
+
+# Интервал смены анекдотов в секундах (1800 секунд = 30 минут)
 INTERVAL = 1800
 
-# Подключаемся к базе данных anecdotes.db
-with sqlite3.connect("anecdotes.db") as conn:
-    c = conn.cursor()
+# Размер кнопок и размер значков на них
+BUTTON_SIZE = 80
+BUTTON_FONT_SIZE = 36
 
-    # Получаем список всех анекдотов
-    c.execute("SELECT text FROM anecdotes")
-    quotes = c.fetchall()
 
-# Создаем новую базу данных SQLite для сохранения истории
-with sqlite3.connect("history.db") as conn2:
-    c2 = conn2.cursor()
+# Создаем класс для окна с анекдотами
+class AnecdoteWindow(QtWidgets.QWidget):
+    def __init__(self, quotes, history_conn):
+        super().__init__()
 
-    # Создаем таблицу для хранения истории с полем даты и времени
-    c2.execute("CREATE TABLE IF NOT EXISTS history (text TEXT, date_time TEXT, liked INTEGER)")
-    conn2.commit()
+        self.quotes = quotes                # список всех анекдотов
+        self.history_conn = history_conn    # открытое соединение с базой истории
+        self.deck = []                      # «колода» анекдотов — чтобы не повторялись
+        self.current_text = ""              # текст текущего анекдота
+        self.current_rowid = None           # id текущей записи в истории
+        self.liked = False                  # поставлен ли лайк текущему анекдоту
 
-# Создаем функцию для обновления анекдотов
-def update_anecdote():
+        # Заголовок, размер и положение окна
+        self.setWindowTitle("Анекдоты")
+        self.setGeometry(825, 34, 620, 500)
+        self.setStyleSheet("background-color: #272727;")
 
-    # Объявляем переменные quote и liked как глобальные, чтобы использовать их в других функциях
-    global quote
-    global liked
+        # Создаем шрифт с заданным размером и жирностью для текста анекдотов
+        font = QtGui.QFont()
+        font.setPointSize(27)
+        font.setBold(True)
 
-    # Присваиваем переменной quote случайный анекдот из списка quotes
-    quote = random.choice(quotes)
+        # Создаем метку для вывода анекдотов
+        self.label = QtWidgets.QLabel()
+        self.label.setFont(font)
+        self.label.setWordWrap(True)
+        self.label.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop | QtCore.Qt.AlignmentFlag.AlignLeft)
+        self.label.setContentsMargins(10, 10, 10, 10)
+        self.label.setStyleSheet("color: #FFFFFF;")
 
-    # Выводим анекдот на метку
-    label.setText(quote[0])
+        # Оборачиваем метку в область с прокруткой, чтобы длинные анекдоты
+        # не обрезались снизу — их можно будет дочитать, прокрутив текст
+        self.scroll_area = QtWidgets.QScrollArea()
+        self.scroll_area.setWidgetResizable(True)                       # метка тянется на всю область
+        self.scroll_area.setWidget(self.label)
+        self.scroll_area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)  # без рамки вокруг текста
+        # Горизонтальная прокрутка не нужна — текст переносится по словам
+        self.scroll_area.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Стилизуем полосу прокрутки под тёмный фон окна
+        self.scroll_area.setStyleSheet("""
+            QScrollArea { background-color: #272727; }
+            QScrollBar:vertical { background: #272727; width: 12px; }
+            QScrollBar::handle:vertical { background: #3a3a3a; border-radius: 6px; min-height: 40px; }
+            QScrollBar::sub-line:vertical, QScrollBar::add-line:vertical { height: 0; }
+            QScrollBar::sub-page:vertical, QScrollBar::add-page:vertical { background: none; }
+        """)
 
-    # Получаем текущую дату и время в формате YYYY-MM-DD HH:MM:SS
-    date_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Создаем шрифт для значков на кнопках — крупный, чтобы было видно
+        button_font = QtGui.QFont()
+        button_font.setPointSize(BUTTON_FONT_SIZE)
 
-    # Сохраняем анекдоты, дату и время в таблицу истории
-    c2.execute("INSERT INTO history VALUES (?, ?, ?)", (quote[0], date_time, 0))
-    conn2.commit()
+        # Создаем кнопку «новый анекдот» и кнопку лайка
+        self.next_button = QtWidgets.QPushButton("🎲")
+        self.next_button.setToolTip("Показать новый анекдот")
 
-    # Сбрасываем состояние кнопки лайка
-    liked = False
+        self.like_button = QtWidgets.QPushButton("👍")
+        self.like_button.setToolTip("Поставить / убрать лайк")
 
-    # Меняем текст кнопки лайка на 🐦
-    like_button.setText("🐦")
+        for btn in (self.next_button, self.like_button):
+            btn.setFont(button_font)
+            btn.setFixedSize(BUTTON_SIZE, BUTTON_SIZE)
+            btn.setStyleSheet("color: #FFFFFF; background-color: #3a3a3a; border-radius: 16px;")
+            btn.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
 
-# Создаем функцию для обработки нажатия на кнопку лайка
-def like_quote():
+        self.next_button.clicked.connect(self.update_anecdote)
+        self.like_button.clicked.connect(self.toggle_like)
 
-    # Объявляем переменную liked как глобальную, чтобы использовать ее в других функциях
-    global liked
+        # Вертикальный компоновщик для кнопок — столбиком в правом верхнем углу
+        buttons_layout = QtWidgets.QVBoxLayout()
+        buttons_layout.addWidget(self.next_button)
+        buttons_layout.addWidget(self.like_button)
+        buttons_layout.addStretch(1)   # растяжка снизу прижимает кнопки к верху
+        buttons_layout.setSpacing(12)  # расстояние между кнопками
 
-    # Если анекдот еще не был лайкнут
-    if not liked:
+        # Горизонтальный компоновщик всего окна: текст слева, кнопки справа
+        main_layout = QtWidgets.QHBoxLayout(self)
+        main_layout.addWidget(self.scroll_area, stretch=1)
+        main_layout.addLayout(buttons_layout)
 
-        # Обновляем поле liked в таблице истории для текущего анекдота
-        c2.execute("UPDATE history SET liked = 1 WHERE text = ?", (quote[0],))
-        conn2.commit()
+        # Таймер для автоматической смены анекдотов
+        self.timer = QtCore.QTimer(self)
+        self.timer.setInterval(INTERVAL * 1000)
+        self.timer.timeout.connect(self.update_anecdote)
+        self.timer.start()
 
-        # Выводим сообщение об успешном лайке
-        label.setText(f"{quote[0]}\n\nВы поставили лайк этому анекдоту!")
+        # Показываем первый анекдот сразу
+        self.update_anecdote()
 
-        # Меняем текст кнопки лайка на 👍
-        like_button.setText("👍")
+    # Функция берет случайный анекдот без повторов, пока все не покажутся
+    def take_quote(self):
+        if not self.deck:
+            self.deck = random.sample(self.quotes, len(self.quotes))
+            # Чтобы только что показанный анекдот не выпал первым в новом круге,
+            # меняем его местами с началом новой колоды
+            if len(self.deck) > 1 and self.deck[-1] == self.current_text:
+                self.deck[0], self.deck[-1] = self.deck[-1], self.deck[0]
+        return self.deck.pop()
 
-        # Меняем состояние кнопки лайка на True
-        liked = True
+    # Функция обновления анекдота
+    def update_anecdote(self):
+        self.current_text = self.take_quote()
 
-    # Иначе, если анекдот уже был лайкнут
-    else:
+        # Текущая дата и время в формате YYYY-MM-DD HH:MM:SS
+        date_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Обновляем поле liked в таблице истории для текущего анекдота
-        c2.execute("UPDATE history SET liked = 0 WHERE text = ?", (quote[0],))
-        conn2.commit()
+        # Сохраняем анекдот в историю и запоминаем id записи
+        cur = self.history_conn.execute(
+            "INSERT INTO history (text, date_time, liked) VALUES (?, ?, 0)",
+            (self.current_text, date_time),
+        )
+        self.history_conn.commit()
+        self.current_rowid = cur.lastrowid
 
-        # Выводим анекдот без сообщения о лайке
-        label.setText(quote[0])
+        # Сбрасываем состояние кнопки лайка
+        self.liked = False
+        self.like_button.setText("👍")
+        self.label.setText(self.current_text)
+        # Прокручиваем текст к началу (если предыдущий анекдот прокрутили вниз)
+        self.scroll_area.verticalScrollBar().setValue(0)
 
-        # Меняем текст кнопки лайка на 🐦
-        like_button.setText("🐦")
+        # Перезапускаем таймер, чтобы 30 минут отсчитывались заново
+        self.timer.start()
 
-        # Меняем состояние кнопки лайка на False
-        liked = False
+    # Функция для поставки и снятия лайка
+    def toggle_like(self):
+        self.liked = not self.liked
 
-# Создаем приложение PyQt
-app = QApplication(sys.argv)
+        # Обновляем поле liked только у текущей записи (по rowid)
+        self.history_conn.execute(
+            "UPDATE history SET liked = ? WHERE rowid = ?",
+            (1 if self.liked else 0, self.current_rowid),
+        )
+        self.history_conn.commit()
 
-# Устанавливаем иконку окна из файла favicon.jpg
-app.setWindowIcon(QIcon('favicon.jpg'))
+        if self.liked:
+            # ❤️ — сердечко с невидимым модификатором, чтобы рисовалось цветным,
+            # а не чёрно-белым значком
+            self.like_button.setText("❤️")
+            self.label.setText(f"{self.current_text}\n\nВы поставили лайк этому анекдоту!")
+        else:
+            self.like_button.setText("👍")
+            self.label.setText(self.current_text)
 
-# Создаем виджет для окна
-window = QWidget()
+    # Функция вызывается при закрытии окна
+    def closeEvent(self, event):
+        # Останавливаем таймер и закрываем базу истории
+        self.timer.stop()
+        self.history_conn.close()
+        super().closeEvent(event)
 
-# Устанавливаем стиль фона для окна
-window.setStyleSheet("background-color: #272727")
 
-# Показываем окно
-window.show()
+def main():
+    # Проверяем, что база с анекдотами существует
+    if not os.path.exists(ANECDOTES_DB):
+        sys.exit(f"База данных не найдена: {ANECDOTES_DB}")
 
-# Создаем метку для вывода анекдотов
-label = QLabel(window) # Устанавливаем окно как родителя для метки
+    # Читаем все анекдоты и сразу закрываем базу
+    conn = sqlite3.connect(ANECDOTES_DB)
+    try:
+        rows = conn.execute("SELECT text FROM anecdotes").fetchall()
+    except sqlite3.OperationalError:
+        sys.exit("В anecdotes.db нет таблицы anecdotes")
+    finally:
+        conn.close()
 
-# Создаем кнопку для лайка анекдотов
-like_button = QPushButton("🐦", window) # Устанавливаем окно как родителя для кнопки
+    quotes = [row[0] for row in rows]
+    if not quotes:
+        sys.exit("Таблица anecdotes пуста — показывать нечего")
 
-# Уменьшаем окно по ширине и увеличиваем по высоте
-label.resize(600, 480)
+    # Соединение с базой истории держим открытым всё время работы программы,
+    # закроем его при закрытии окна (closeEvent)
+    history_conn = sqlite3.connect(HISTORY_DB)
+    history_conn.execute(
+        "CREATE TABLE IF NOT EXISTS history (text TEXT, date_time TEXT, liked INTEGER)"
+    )
+    history_conn.commit()
 
-# Показываем окно
-label.show()
+    # Создаем приложение и задаем иконку
+    app = QtWidgets.QApplication(sys.argv)
+    app.setWindowIcon(QtGui.QIcon(ICON_PATH))
 
-# Создаем шрифт с заданным размером и жирностью
-font = QFont()
-font.setPointSize(27)
-font.setBold(True)
+    # Создаем и показываем окно
+    window = AnecdoteWindow(quotes, history_conn)
+    window.show()
 
-# Устанавливаем шрифт для метки
-label.setFont(font)
+    # Запускаем главный цикл приложения
+    sys.exit(app.exec())
 
-# Перемещаем окно
-label.move(10, 10)
-
-# Включаем перенос текста по словам для метки
-label.setWordWrap(True)
-
-# Устанавливаем прозрачность окна
-label.setWindowOpacity(1)
-
-# Устанавливаем геометрию окна
-window.setGeometry(825, 34, 620, 500)
-
-# Устанавливаем название окна - "Анекдоты"
-window.setWindowTitle("Анекдоты")
-
-# Устанавливаем выравнивание текста по верхнему краю для метки
-label.setAlignment(Qt.AlignTop)
-
-# Устанавливаем отступ от краев окна в 10 пикселей для метки
-label.setContentsMargins(10, 10, 60, 10)
-
-# Устанавливаем цвет текста в белый для метки
-label.setStyleSheet("color: #FFFFFF")
-
-# Устанавливаем шрифт для кнопки
-like_button.setFont(font)
-
-# Устанавливаем размер кнопки
-like_button.resize(50, 50)
-
-# Показываем кнопку
-like_button.show()
-
-# Перемещаем кнопку в правый верхний угол окна
-like_button.move(label.width() - like_button.width() - 0, 20)
-
-# Связываем кнопку с функцией лайка
-like_button.clicked.connect(like_quote)
-
-# Создаем переменную для хранения состояния кнопки лайка
-liked = False
-
-# Создаем таймер PyQt для обновления анекдотов 
-timer = QTimer()
-
-# Связываем таймер с функцией обновления анекдотов 
-timer.timeout.connect(update_anecdote)
-
-# Устанавливаем интервал таймера в интервал секунд (30 минут)
-timer.setInterval(INTERVAL * 1000)
-
-# Запускаем таймер для обновления анекдотов 
-timer.start()
-
-# Обновляем анекдоты в первый раз 
-update_anecdote()
 
 if __name__ == "__main__":
-    # Запускаем приложение PyQt 
-    app.exec_()
+    main()
